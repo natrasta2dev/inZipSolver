@@ -45,16 +45,16 @@ class MainActivity : Activity() {
                 .apply { bottomMargin = (12 * dp).toInt() }
         }
 
-        root.addView(text("InZip Solver", 30f, true))
+        root.addView(text("InReflex Solver", 30f, true))
         root.addView(text(
-            "Une bulle flottante s'affiche par-dessus LinkedIn. Ouvre un jeu (Zip, Queens, Tango, Mini Sudoku ou Patches), " +
-            "touche la bulle : elle reconnaît le jeu et affiche la solution en transparence sur la grille. C'est toi qui joues.", 16f, color = "#4A4552"))
+            "Une bulle flottante apparaît toute seule quand tu ouvres un jeu de réflexion LinkedIn (Zip, Queens, Tango, " +
+            "Mini Sudoku ou Patches) et disparaît quand tu le quittes. Touche-la : elle affiche la solution en transparence sur la grille. C'est toi qui joues.", 16f, color = "#4A4552"))
         root.addView(text(
             "• Touche la bulle : afficher ou masquer la solution\n• Glisse la bulle : la déplacer\n• Appui long sur la bulle : la fermer",
             15f, color = "#4A4552"))
         status = text("", 14f, color = "#6F6A78")
         root.addView(status)
-        root.addView(button("Lancer la bulle et ouvrir LinkedIn", "#F26A21", "#FFFFFF") { start() })
+        root.addView(button("Activer la bulle et ouvrir LinkedIn", "#F26A21", "#FFFFFF") { start() })
         root.addView(button("Arrêter la bulle", "#E6E1EA", "#1D1A24") {
             stopService(Intent(this, OverlayService::class.java)); Toast.makeText(this, "Bulle arrêtée", Toast.LENGTH_SHORT).show()
         })
@@ -75,7 +75,7 @@ class MainActivity : Activity() {
 
     private fun start() {
         if (!Settings.canDrawOverlays(this)) {
-            Toast.makeText(this, "Active « InZip Solver » dans la liste, puis reviens ici.", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "Active « InReflex Solver » dans la liste, puis reviens ici.", Toast.LENGTH_LONG).show()
             startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
             return
         }

@@ -56,6 +56,15 @@ class OverlayService : Service() {
     private var pathView: SolutionView? = null
     private var busy = false
     private var screenW = 0
+    private var bubbleLp: WindowManager.LayoutParams? = null
+    private var bubbleShown = false
+    private var checking = false
+    private var lastTs = 0L
+    private var misses = 0
+    // vérifie régulièrement si une grille de jeu est à l'écran pour afficher ou cacher la bulle
+    private val watcher = object : Runnable {
+        override fun run() { tick(); main.postDelayed(this, 1200) }
+    }
     private var screenH = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -71,21 +80,23 @@ class OverlayService : Service() {
             if (data == null) { stopSelf(); return START_NOT_STICKY }
             wm = getSystemService(WindowManager::class.java)
             setupCapture(code, data)
-            showBubble()
+            createBubble()
+            main.postDelayed(watcher, 800)
+            toast("La bulle apparaîtra dès qu'un jeu de réflexion est à l'écran.")
         }
         return START_NOT_STICKY
     }
 
     private fun startAsForeground() {
         val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(CHANNEL, "Bulle InZip", NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(NotificationChannel(CHANNEL, "Bulle InReflex", NotificationManager.IMPORTANCE_LOW))
         val stop = PendingIntent.getService(this, 0, Intent(this, OverlayService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val open = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val n = Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentTitle("Bulle InZip active")
-            .setContentText("Touche la bulle sur un jeu LinkedIn pour voir la solution.")
+            .setContentTitle("InReflex Solver actif")
+            .setContentText("La bulle apparaît automatiquement sur les jeux de réflexion LinkedIn.")
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Arrêter", stop).build())
             .setOngoing(true)
@@ -123,7 +134,7 @@ class OverlayService : Service() {
 
     private fun overlayType() = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
 
-    private fun showBubble() {
+    private fun createBubble() {
         val dp = resources.displayMetrics.density
         val size = (58 * dp).roundToInt()
         val lp = WindowManager.LayoutParams(size, size, overlayType(),
@@ -148,8 +159,40 @@ class OverlayService : Service() {
             }
             true
         }
-        wm.addView(b, lp)
-        bubble = b
+        bubble = b; bubbleLp = lp
+    }
+
+    private fun attachBubble() {
+        val b = bubble ?: return; if (bubbleShown) return
+        try { wm.addView(b, bubbleLp); bubbleShown = true } catch (_: Exception) { }
+    }
+
+    private fun detachBubble() {
+        val b = bubble ?: return; if (!bubbleShown) return
+        try { wm.removeView(b) } catch (_: Exception) { }
+        bubbleShown = false
+    }
+
+    private fun tick() {
+        if (checking || busy) return
+        val img = latest ?: return
+        if (img.timestamp == lastTs) return   // écran inchangé
+        lastTs = img.timestamp
+        val shot = try { toBitmap(img) } catch (_: Exception) { return }
+        checking = true
+        Thread {
+            val present = try {
+                val tw = min(480, shot.width); val th = (shot.height.toLong() * tw / shot.width).toInt()
+                val small = Bitmap.createScaledBitmap(shot, tw, th, true)
+                val px = IntArray(tw * th); small.getPixels(px, 0, tw, 0, 0, tw, th)
+                Board.find(Screen(tw, th, px)) != null
+            } catch (_: Exception) { false }
+            main.post {
+                checking = false
+                if (present) { misses = 0; attachBubble() }
+                else if (++misses >= 2 && !busy) { removePath(); detachBubble() }
+            }
+        }.start()
     }
 
     private fun onBubbleTap() {
@@ -207,7 +250,7 @@ class OverlayService : Service() {
         wm.addView(v, lp)
         pathView = v
         // garde la bulle au-dessus de la solution
-        bubble?.let { b -> val blp = b.layoutParams; wm.removeView(b); wm.addView(b, blp) }
+        if (bubbleShown) { detachBubble(); attachBubble() }
         val tip = when (sol) {
             is Solution.Zip -> "Zip : trace le chemin en suivant les flèches."
             is Solution.Queens -> "Queens : place une reine sur chaque case marquée."
@@ -223,8 +266,9 @@ class OverlayService : Service() {
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
     override fun onDestroy() {
+        main.removeCallbacks(watcher)
         removePath()
-        bubble?.let { try { wm.removeView(it) } catch (_: Exception) {} }
+        detachBubble()
         bubble = null
         latest?.close(); latest = null
         display?.release(); reader?.close(); projection?.stop()

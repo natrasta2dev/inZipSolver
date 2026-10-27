@@ -11,7 +11,7 @@
     </queries>
 
     <application
-        android:label="InZip Solver"
+        android:label="InReflex Solver"
         android:icon="@mipmap/ic_launcher"
         android:allowBackup="false"
         android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
