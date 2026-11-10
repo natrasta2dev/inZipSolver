@@ -37,7 +37,7 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-/** Bulle flottante : lit l'écran à la demande et dessine le chemin à suivre. Ne touche jamais l'écran à la place de l'utilisateur. */
+/** Bulle flottante : repère la grille du Zip à l'écran et dessine le chemin à suivre. Ne touche jamais l'écran à la place de l'utilisateur. */
 class OverlayService : Service() {
     companion object {
         const val EXTRA_CODE = "code"
@@ -54,8 +54,16 @@ class OverlayService : Service() {
     private var latest: Image? = null
     private var bubble: BubbleView? = null
     private var pathView: PathView? = null
-    private var busy = false
     private var screenW = 0
+    private var checking = false
+    private var lastTs = 0L
+    private var misses = 0
+    private var paused = false                    // l'utilisateur a masqué le chemin pour cette grille
+    private var shown: ZipReader.Grid? = null     // grille actuellement suivie (coordonnées de la capture réduite)
+    private var failedSig: String? = null         // grille déjà tentée sans succès : on ne relance pas le calcul
+    private val watcher = object : Runnable {
+        override fun run() { tick(); main.postDelayed(this, 900) }
+    }
     private var screenH = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -72,6 +80,8 @@ class OverlayService : Service() {
             wm = getSystemService(WindowManager::class.java)
             setupCapture(code, data)
             showBubble()
+            main.postDelayed(watcher, 600)
+            toast("Ouvre le Zip : le chemin s'affichera tout seul sur la grille.")
         }
         return START_NOT_STICKY
     }
@@ -85,7 +95,7 @@ class OverlayService : Service() {
         val n = Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_menu_view)
             .setContentTitle("Bulle InZip active")
-            .setContentText("Touche la bulle sur la grille du Zip pour voir le chemin.")
+            .setContentText("Le chemin s'affiche tout seul quand la grille du Zip est à l'écran.")
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Arrêter", stop).build())
             .setOngoing(true)
@@ -153,39 +163,53 @@ class OverlayService : Service() {
     }
 
     private fun onBubbleTap() {
-        if (busy) return
-        if (pathView != null) { removePath(); return }
-        busy = true
-        bubble?.visibility = View.INVISIBLE
-        // laisse l'écran se redessiner sans la bulle avant de prendre l'image
-        main.postDelayed({ capture() }, 250)
+        when {
+            pathView != null -> { removePath(); paused = true; toast("Chemin masqué. Touche la bulle pour le réafficher.") }
+            paused -> { paused = false; shown = null; lastTs = 0; misses = 0; toast("Recherche de la grille…") }
+            else -> toast("Aucune grille de Zip à l'écran pour l'instant.")
+        }
     }
 
-    private fun capture() {
-        val img = latest
-        val shot: Bitmap? = try { img?.let { toBitmap(it) } } catch (_: Exception) { null }
-        bubble?.visibility = View.VISIBLE
-        if (shot == null) { busy = false; toast("Capture indisponible. Arrête puis relance la bulle."); return }
-        bubble?.setBusy(true)
+    /** Appelé en continu : affiche le chemin dès qu'une grille apparaît, le retire quand elle disparaît. */
+    private fun tick() {
+        if (checking) return
+        val img = latest ?: return
+        if (img.timestamp == lastTs) return      // écran inchangé depuis la dernière vérification
+        lastTs = img.timestamp
+        val shot = try { toBitmap(img) } catch (_: Exception) { return }
+        val tracked = shown
+        checking = true
         Thread {
             val tw = min(720, shot.width)
             val th = (shot.height.toLong() * tw / shot.width).toInt()
             val small = Bitmap.createScaledBitmap(shot, tw, th, true)
             val px = IntArray(tw * th); small.getPixels(px, 0, tw, 0, 0, tw, th)
             val gray = FloatArray(px.size) { i -> val c = px[i]; (((c shr 16) and 255) * 299 + ((c shr 8) and 255) * 587 + (c and 255) * 114) / 1000f }
-            val grid = ZipReader.read(gray, tw, th)
-            val res = grid?.takeIf { it.unread == 0 }?.let { ZipSolver.solve(it) }
             val k = shot.width.toFloat() / tw
-            main.post {
-                busy = false; bubble?.setBusy(false)
-                when {
-                    grid == null -> toast("Grille du Zip introuvable. Affiche toute la grille à l'écran, puis touche la bulle.")
-                    grid.unread > 0 -> toast("Un chiffre n'a pas pu être lu. Réessaie quand la grille est bien visible.")
-                    res?.path == null -> toast("Grille lue, mais pas de solution : ${res?.error ?: ""}")
-                    else -> showPath(res.path, grid, k)
+            if (tracked != null) {
+                val present = try { ZipReader.stillThere(gray, tw, th, tracked) } catch (_: Exception) { false }
+                main.post { checking = false; onPresence(present) }
+            } else {
+                val grid = try { ZipReader.read(gray, tw, th) } catch (_: Exception) { null }
+                val usable = grid?.takeIf { it.unread == 0 && it.nums.count { n -> n > 0 } >= 2 }
+                val sig = usable?.let { "${it.n}:" + it.nums.joinToString(",") + ":" + it.h.joinToString("") { r -> r.joinToString("") { b -> if (b) "1" else "0" } } + it.v.joinToString("") { r -> r.joinToString("") { b -> if (b) "1" else "0" } } }
+                if (usable == null || sig == failedSig) { main.post { checking = false }; return@Thread }
+                if (usable.n >= 10) main.post { toast("Grille ${usable.n} × ${usable.n} trouvée, calcul du chemin…") }
+                val res = ZipSolver.solve(usable)
+                main.post {
+                    checking = false
+                    val path = res.path
+                    if (path == null) { failedSig = sig; toast("Chemin introuvable pour cette grille : ${res.error}") }
+                    else if (shown == null && !paused) { failedSig = null; shown = usable; misses = 0; showPath(path, usable, k) }
                 }
             }
         }.start()
+    }
+
+    private fun onPresence(present: Boolean) {
+        if (present) { misses = 0; return }
+        if (++misses < 2) { lastTs = 0; return }  // revérifie au prochain passage avant de conclure
+        removePath(); shown = null; paused = false; misses = 0; lastTs = 0
     }
 
     private fun toBitmap(img: Image): Bitmap {
@@ -214,7 +238,6 @@ class OverlayService : Service() {
         pathView = v
         // garde la bulle au-dessus du chemin
         bubble?.let { b -> val blp = b.layoutParams; wm.removeView(b); wm.addView(b, blp) }
-        toast("Chemin affiché. Trace-le en suivant les flèches. Touche la bulle pour le masquer.")
     }
 
     private fun removePath() { pathView?.let { try { wm.removeView(it) } catch (_: Exception) {} }; pathView = null }
@@ -222,6 +245,7 @@ class OverlayService : Service() {
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
     override fun onDestroy() {
+        main.removeCallbacks(watcher)
         removePath()
         bubble?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         bubble = null

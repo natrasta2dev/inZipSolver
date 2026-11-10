@@ -47,10 +47,10 @@ class MainActivity : Activity() {
 
         root.addView(text("InZip Solver", 30f, true))
         root.addView(text(
-            "Une bulle flottante s'affiche par-dessus LinkedIn. Ouvre le Zip, touche la bulle : " +
-            "le chemin à suivre apparaît en transparence sur la grille. C'est toi qui le traces au doigt.", 16f, color = "#4A4552"))
+            "Ouvre le Zip dans LinkedIn : dès que la grille est à l'écran, le chemin à suivre s'affiche tout seul " +
+            "en transparence. Il disparaît quand tu quittes la grille. C'est toi qui le traces au doigt. Grilles de 4 × 4 à 12 × 12.", 16f, color = "#4A4552"))
         root.addView(text(
-            "• Touche la bulle : afficher ou masquer le chemin\n• Glisse la bulle : la déplacer\n• Appui long sur la bulle : la fermer",
+            "• Touche la bulle : masquer ou réafficher le chemin\n• Glisse la bulle : la déplacer\n• Appui long sur la bulle : tout arrêter",
             15f, color = "#4A4552"))
         status = text("", 14f, color = "#6F6A78")
         root.addView(status)

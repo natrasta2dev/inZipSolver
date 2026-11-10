@@ -56,7 +56,7 @@ object ZipReader {
 
         val cmax = colRun.maxOrNull() ?: return null
         val X = prog(clusters(colRun, max(0.2 * cmax, 60.0)), 0.0)
-        if (X.size < 5 || X.size > 11) return null
+        if (X.size < 5 || X.size > 13) return null   // de 4 × 4 à 12 × 12
         val n = X.size - 1
         val d = (X[n] - X[0]) / n
         val Y = prog(clusters(rowRun, 0.6 * (X[n] - X[0])), d).take(n + 1)
@@ -89,6 +89,39 @@ object ZipReader {
             if (value > 0) nums[r * n + c] = value else unread++
         }
         return Grid(n, h, v, nums, unread, x0, y0, d)
+    }
+
+    /**
+     * Vérifie que la grille suivie est toujours au même endroit, sans relire les chiffres :
+     * le chemin affiché recouvre l'écran capturé, mais il ne touche ni le cadre ni le contour des cercles.
+     */
+    fun stillThere(g: FloatArray, W: Int, H: Int, grid: ZipReader.Grid): Boolean {
+        val hist = IntArray(256); for (v in g) hist[v.toInt().coerceIn(0, 255)]++
+        var acc = 0; var bg = 255; for (i in 0 until 256) { acc += hist[i]; if (acc >= g.size / 2) { bg = i; break } }
+        val n = grid.n; val d = grid.d; val x0 = grid.x0; val y0 = grid.y0; val side = n * d
+        fun dark(x: Int, y: Int) = x in 0 until W && y in 0 until H && g[y * W + x] < bg - 25
+        fun line(vertical: Boolean, at: Double): Boolean {
+            var hit = 0; var tot = 0; var t = 0.35 * d
+            while (t < side - 0.35 * d) {
+                val c = (if (vertical) x0 else y0) + at; tot++
+                if ((-2..2).any { o -> if (vertical) dark((c + o).toInt(), (y0 + t).toInt()) else dark((x0 + t).toInt(), (c + o).toInt()) }) hit++
+                t += 2.0
+            }
+            return tot > 0 && hit >= 0.75 * tot
+        }
+        if (!(line(true, 0.0) && line(true, side) && line(false, 0.0) && line(false, side))) return false
+        var circles = 0; var found = 0
+        for (i in grid.nums.indices) if (grid.nums[i] > 0) {
+            circles++
+            val cx = x0 + (i % n + .5) * d; val cy = y0 + (i / n + .5) * d; var hits = 0
+            for (a in 0 until 24) {
+                val ang = a / 24.0 * 2 * Math.PI
+                val x = (cx + 0.27 * d * Math.cos(ang)).toInt(); val y = (cy + 0.27 * d * Math.sin(ang)).toInt()
+                if (x in 0 until W && y in 0 until H && g[y * W + x] < bg - 150) hits++
+            }
+            if (hits >= 14) found++
+        }
+        return circles > 0 && found >= 0.7 * circles
     }
 
     private fun clusters(arr: IntArray, thr: Double): List<Double> {
