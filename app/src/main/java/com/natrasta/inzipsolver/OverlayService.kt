@@ -53,18 +53,9 @@ class OverlayService : Service() {
     private var reader: ImageReader? = null
     private var latest: Image? = null
     private var bubble: BubbleView? = null
-    private var pathView: SolutionView? = null
+    private var pathView: PathView? = null
     private var busy = false
     private var screenW = 0
-    private var bubbleLp: WindowManager.LayoutParams? = null
-    private var bubbleShown = false
-    private var checking = false
-    private var lastTs = 0L
-    private var misses = 0
-    // vérifie régulièrement si une grille de jeu est à l'écran pour afficher ou cacher la bulle
-    private val watcher = object : Runnable {
-        override fun run() { tick(); main.postDelayed(this, 1200) }
-    }
     private var screenH = 0
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -80,23 +71,21 @@ class OverlayService : Service() {
             if (data == null) { stopSelf(); return START_NOT_STICKY }
             wm = getSystemService(WindowManager::class.java)
             setupCapture(code, data)
-            createBubble()
-            main.postDelayed(watcher, 800)
-            toast("La bulle apparaîtra dès qu'un jeu de réflexion est à l'écran.")
+            showBubble()
         }
         return START_NOT_STICKY
     }
 
     private fun startAsForeground() {
         val nm = getSystemService(NotificationManager::class.java)
-        nm.createNotificationChannel(NotificationChannel(CHANNEL, "Bulle InReflex", NotificationManager.IMPORTANCE_LOW))
+        nm.createNotificationChannel(NotificationChannel(CHANNEL, "Bulle InZip", NotificationManager.IMPORTANCE_LOW))
         val stop = PendingIntent.getService(this, 0, Intent(this, OverlayService::class.java).setAction(ACTION_STOP),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
         val open = PendingIntent.getActivity(this, 1, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         val n = Notification.Builder(this, CHANNEL)
             .setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentTitle("InReflex Solver actif")
-            .setContentText("La bulle apparaît automatiquement sur les jeux de réflexion LinkedIn.")
+            .setContentTitle("Bulle InZip active")
+            .setContentText("Touche la bulle sur la grille du Zip pour voir le chemin.")
             .setContentIntent(open)
             .addAction(Notification.Action.Builder(null, "Arrêter", stop).build())
             .setOngoing(true)
@@ -134,7 +123,7 @@ class OverlayService : Service() {
 
     private fun overlayType() = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
 
-    private fun createBubble() {
+    private fun showBubble() {
         val dp = resources.displayMetrics.density
         val size = (58 * dp).roundToInt()
         val lp = WindowManager.LayoutParams(size, size, overlayType(),
@@ -159,40 +148,8 @@ class OverlayService : Service() {
             }
             true
         }
-        bubble = b; bubbleLp = lp
-    }
-
-    private fun attachBubble() {
-        val b = bubble ?: return; if (bubbleShown) return
-        try { wm.addView(b, bubbleLp); bubbleShown = true } catch (_: Exception) { }
-    }
-
-    private fun detachBubble() {
-        val b = bubble ?: return; if (!bubbleShown) return
-        try { wm.removeView(b) } catch (_: Exception) { }
-        bubbleShown = false
-    }
-
-    private fun tick() {
-        if (checking || busy) return
-        val img = latest ?: return
-        if (img.timestamp == lastTs) return   // écran inchangé
-        lastTs = img.timestamp
-        val shot = try { toBitmap(img) } catch (_: Exception) { return }
-        checking = true
-        Thread {
-            val present = try {
-                val tw = min(480, shot.width); val th = (shot.height.toLong() * tw / shot.width).toInt()
-                val small = Bitmap.createScaledBitmap(shot, tw, th, true)
-                val px = IntArray(tw * th); small.getPixels(px, 0, tw, 0, 0, tw, th)
-                Board.find(Screen(tw, th, px)) != null
-            } catch (_: Exception) { false }
-            main.post {
-                checking = false
-                if (present) { misses = 0; attachBubble() }
-                else if (++misses >= 2 && !busy) { removePath(); detachBubble() }
-            }
-        }.start()
+        wm.addView(b, lp)
+        bubble = b
     }
 
     private fun onBubbleTap() {
@@ -215,12 +172,18 @@ class OverlayService : Service() {
             val th = (shot.height.toLong() * tw / shot.width).toInt()
             val small = Bitmap.createScaledBitmap(shot, tw, th, true)
             val px = IntArray(tw * th); small.getPixels(px, 0, tw, 0, 0, tw, th)
-            val out = try { Games.solve(Screen(tw, th, px)) } catch (e: Exception) { Outcome(null, "Erreur de lecture : ${e.message}") }
+            val gray = FloatArray(px.size) { i -> val c = px[i]; (((c shr 16) and 255) * 299 + ((c shr 8) and 255) * 587 + (c and 255) * 114) / 1000f }
+            val grid = ZipReader.read(gray, tw, th)
+            val res = grid?.takeIf { it.unread == 0 }?.let { ZipSolver.solve(it) }
             val k = shot.width.toFloat() / tw
             main.post {
                 busy = false; bubble?.setBusy(false)
-                val sol = out.solution
-                if (sol == null) toast(out.message) else showSolution(sol, k)
+                when {
+                    grid == null -> toast("Grille du Zip introuvable. Affiche toute la grille à l'écran, puis touche la bulle.")
+                    grid.unread > 0 -> toast("Un chiffre n'a pas pu être lu. Réessaie quand la grille est bien visible.")
+                    res?.path == null -> toast("Grille lue, mais pas de solution : ${res?.error ?: ""}")
+                    else -> showPath(res.path, grid, k)
+                }
             }
         }.start()
     }
@@ -234,31 +197,24 @@ class OverlayService : Service() {
         return if (rowPx == img.width) padded else Bitmap.createBitmap(padded, 0, 0, img.width, img.height)
     }
 
-    private fun showSolution(sol: Solution, k: Float) {
+    private fun showPath(path: IntArray, grid: ZipReader.Grid, k: Float) {
         removePath()
-        val v = SolutionView(this, sol, k)
+        val v = PathView(this, path, grid.n, (grid.x0 * k).toFloat(), (grid.y0 * k).toFloat(), (grid.d * k).toFloat())
         val lp = WindowManager.LayoutParams(screenW, screenH, overlayType(),
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                 WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
             PixelFormat.TRANSLUCENT).apply {
             gravity = Gravity.TOP or Gravity.START
             x = 0; y = 0
-            // au-delà de 0.8, Android bloque les touchers vers l'app en dessous : il faut pouvoir jouer à travers
+            // au-delà de 0.8, Android bloque les touchers vers l'app en dessous : il faut pouvoir tracer à travers
             alpha = 0.8f
             if (Build.VERSION.SDK_INT >= 28) layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
         }
         wm.addView(v, lp)
         pathView = v
-        // garde la bulle au-dessus de la solution
-        if (bubbleShown) { detachBubble(); attachBubble() }
-        val tip = when (sol) {
-            is Solution.Zip -> "Zip : trace le chemin en suivant les flèches."
-            is Solution.Queens -> "Queens : place une reine sur chaque case marquée."
-            is Solution.Sudoku -> "Mini Sudoku : les chiffres manquants sont en orange."
-            is Solution.Tango -> "Tango : les symboles à placer sont affichés en transparence."
-            is Solution.Patches -> "Patches : dessine chaque forme encadrée."
-        }
-        toast("$tip Touche la bulle pour masquer.")
+        // garde la bulle au-dessus du chemin
+        bubble?.let { b -> val blp = b.layoutParams; wm.removeView(b); wm.addView(b, blp) }
+        toast("Chemin affiché. Trace-le en suivant les flèches. Touche la bulle pour le masquer.")
     }
 
     private fun removePath() { pathView?.let { try { wm.removeView(it) } catch (_: Exception) {} }; pathView = null }
@@ -266,9 +222,8 @@ class OverlayService : Service() {
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_LONG).show()
 
     override fun onDestroy() {
-        main.removeCallbacks(watcher)
         removePath()
-        detachBubble()
+        bubble?.let { try { wm.removeView(it) } catch (_: Exception) {} }
         bubble = null
         latest?.close(); latest = null
         display?.release(); reader?.close(); projection?.stop()
@@ -300,87 +255,37 @@ class OverlayService : Service() {
         }
     }
 
-    private class SolutionView(ctx: Context, private val sol: Solution, private val k: Float) : View(ctx) {
+    private class PathView(ctx: Context, private val path: IntArray, private val n: Int,
+                           private val gx: Float, private val gy: Float, private val cs: Float) : View(ctx) {
+        private val line = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(150, 242, 106, 33); style = Paint.Style.STROKE
+            strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND; strokeWidth = cs * 0.28f
+        }
+        private val arrow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.WHITE; style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND
+            strokeWidth = maxOf(3f, cs * 0.05f)
+        }
         private val loc = IntArray(2)
-        private val orange = Color.rgb(242, 106, 33)
-        private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.STROKE; strokeCap = Paint.Cap.ROUND; strokeJoin = Paint.Join.ROUND }
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { style = Paint.Style.FILL }
-        private val text = Paint(Paint.ANTI_ALIAS_FLAG).apply { textAlign = Paint.Align.CENTER; typeface = android.graphics.Typeface.DEFAULT_BOLD }
-
         override fun onDraw(c: Canvas) {
             getLocationOnScreen(loc)
-            c.translate(-loc[0].toFloat(), -loc[1].toFloat())
-            when (sol) {
-                is Solution.Zip -> drawZip(c, sol)
-                is Solution.Queens -> sol.queens.forEachIndexed { r, col -> val g = sol.geo; drawQueen(c, sx(g.cx(col)), sy(g.cy(r)), (g.cw * k).toFloat()) }
-                is Solution.Sudoku -> { val g = sol.geo; val cs = (g.cw * k).toFloat()
-                    text.color = orange; text.textSize = cs * 0.55f
-                    for (i in sol.values.indices) if (!sol.given[i]) {
-                        val x = sx(g.cx(i % g.n)); val y = sy(g.cy(i / g.n))
-                        c.drawText(sol.values[i].toString(), x, y - (text.descent() + text.ascent()) / 2, text)
-                    } }
-                is Solution.Tango -> { val g = sol.geo; val cs = (g.cw * k).toFloat()
-                    for (i in sol.values.indices) if (!sol.given[i]) {
-                        val x = sx(g.cx(i % g.n)); val y = sy(g.cy(i / g.n))
-                        if (sol.values[i] == 1) drawSun(c, x, y, cs) else drawMoon(c, x, y, cs)
-                    } }
-                is Solution.Patches -> { val g = sol.geo
-                    for (rc in sol.rects) {
-                        val l = sx(g.x0 + rc.c0 * g.cw); val t = sy(g.y0 + rc.r0 * g.ch)
-                        val r = sx(g.x0 + (rc.c0 + rc.w) * g.cw); val b = sy(g.y0 + (rc.r0 + rc.h) * g.ch)
-                        val inset = (g.cw * k * 0.08).toFloat(); val rad = (g.cw * k * 0.18).toFloat()
-                        val col = rc.color or 0xFF000000.toInt()
-                        fill.color = col; fill.alpha = 70
-                        c.drawRoundRect(l + inset, t + inset, r - inset, b - inset, rad, rad, fill)
-                        stroke.color = col; stroke.strokeWidth = (g.cw * k * 0.07).toFloat()
-                        c.drawRoundRect(l + inset, t + inset, r - inset, b - inset, rad, rad, stroke)
-                    } }
-            }
-        }
-        private fun sx(x: Double) = (x * k).toFloat()
-        private fun sy(y: Double) = (y * k).toFloat()
-
-        private fun drawZip(c: Canvas, z: Solution.Zip) {
-            val n = z.n; val cs = (z.d * k).toFloat()
-            fun pt(i: Int) = floatArrayOf(sx(z.x0 + (i % n + .5) * z.d), sy(z.y0 + (i / n + .5) * z.d))
+            val ox = gx - loc[0]; val oy = gy - loc[1]
+            fun pt(i: Int) = floatArrayOf(ox + (i % n + .5f) * cs, oy + (i / n + .5f) * cs)
             val p = Path()
-            z.path.forEachIndexed { j, i -> val q = pt(i); if (j == 0) p.moveTo(q[0], q[1]) else p.lineTo(q[0], q[1]) }
-            stroke.color = Color.argb(150, 242, 106, 33); stroke.strokeWidth = cs * 0.28f
-            c.drawPath(p, stroke)
-            stroke.color = Color.WHITE; stroke.strokeWidth = maxOf(3f, cs * 0.05f)
+            path.forEachIndexed { k, i -> val q = pt(i); if (k == 0) p.moveTo(q[0], q[1]) else p.lineTo(q[0], q[1]) }
+            c.drawPath(p, line)
             val L = cs * 0.09f
-            for (j in 1 until z.path.size) {
-                val a = pt(z.path[j - 1]); val b = pt(z.path[j])
+            for (k in 1 until path.size) {
+                val a = pt(path[k - 1]); val b = pt(path[k])
                 val mx = (a[0] + b[0]) / 2; val my = (a[1] + b[1]) / 2
                 val ang = atan2((b[1] - a[1]).toDouble(), (b[0] - a[0]).toDouble())
                 val ca = cos(ang).toFloat(); val sa = sin(ang).toFloat()
-                c.drawPath(Path().apply {
+                val chev = Path().apply {
                     moveTo(mx - L * ca + L * sa, my - L * sa - L * ca)
                     lineTo(mx + L * ca * 0.6f, my + L * sa * 0.6f)
                     lineTo(mx - L * ca - L * sa, my - L * sa + L * ca)
-                }, stroke)
+                }
+                c.drawPath(chev, arrow)
             }
-        }
-        private fun drawQueen(c: Canvas, x: Float, y: Float, cs: Float) {
-            fill.color = orange; fill.alpha = 210
-            c.drawCircle(x, y, cs * 0.32f, fill)
-            fill.color = Color.WHITE; fill.alpha = 255
-            val w = cs * 0.34f; val h = cs * 0.26f
-            c.drawPath(Path().apply {
-                moveTo(x - w / 2, y + h / 2); lineTo(x - w / 2, y - h / 2); lineTo(x - w / 4, y)
-                lineTo(x, y - h / 2); lineTo(x + w / 4, y); lineTo(x + w / 2, y - h / 2); lineTo(x + w / 2, y + h / 2); close()
-            }, fill)
-        }
-        private fun drawSun(c: Canvas, x: Float, y: Float, cs: Float) {
-            fill.color = Color.rgb(255, 179, 31); fill.alpha = 170; c.drawCircle(x, y, cs * 0.22f, fill)
-            stroke.color = Color.rgb(205, 105, 30); stroke.strokeWidth = cs * 0.04f; c.drawCircle(x, y, cs * 0.22f, stroke)
-        }
-        private fun drawMoon(c: Canvas, x: Float, y: Float, cs: Float) {
-            val r = cs * 0.22f
-            val outer = Path().apply { addCircle(x, y, r, Path.Direction.CW) }
-            val cut = Path().apply { addCircle(x - r * 0.45f, y - r * 0.35f, r * 0.85f, Path.Direction.CW) }
-            outer.op(cut, Path.Op.DIFFERENCE)
-            fill.color = Color.rgb(74, 134, 232); fill.alpha = 190; c.drawPath(outer, fill)
         }
     }
 }
